@@ -1,6 +1,7 @@
 #Compiler gcc for C program
 include rules.mk
-CC = gcc
+CROSS_COMPILE ?=
+CC = $(CROSS_COMPILE)gcc
 
 SRC_SER = v4l2_main.c v4l2_capture.c
 OBJ_SER = $(addprefix obj/, $(SRC_SER:.c=.o))
