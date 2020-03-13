@@ -33,11 +33,18 @@ int close_video_device(int *fd)
 
 static int xioctl(int fh, int request, void *arg)
 {
-    int r;
+    int r, retry = 0;
 
     do {
         r = ioctl(fh, request, arg);
-    } while (-1 == r && EINTR == errno);
+        if (r == -1 && errno == EINTR) {
+            ++retry;
+            if (retry < 5)
+                continue;
+            else
+                break;
+        }
+    } while (0);
 
     return r;
 }
@@ -48,18 +55,20 @@ static int stop_capturing(v4l2_capture_t *dev)
     int ret = 0;
 
     fprintf(stdout, "Stop v4l2 capturing\n");
+
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (-1 == xioctl(dev->fd, VIDIOC_STREAMOFF, &type)) {
-                fprintf(stderr, "VIDIOC_STREAMOFF failed\n");
-                ret = -1;
-            }
-            break;
-        default:
-            fprintf(stderr, "%d io method failed\n", dev->io);
+    case IO_METHOD_MMAP:
+        type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(dev->fd, VIDIOC_STREAMOFF, &type) == -1) {
+            fprintf(stderr, "VIDIOC_STREAMOFF failed\n");
             ret = -1;
-            break;
+        }
+        break;
+
+    default:
+        fprintf(stderr, "%d io method failed\n", dev->io);
+        ret = -1;
+        break;
     }
 
     return ret;
@@ -72,25 +81,25 @@ static int start_streaming(v4l2_capture_t *dev)
     enum v4l2_buf_type type;
 
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            for (i = 0; i < dev->buf_count; ++i) {
-                struct v4l2_buffer buf;
-                memset(&buf, 0, sizeof(struct v4l2_buffer));
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_MMAP;
-                buf.index = i;
+    case IO_METHOD_MMAP:
+        for (i = 0; i < dev->buf_count; ++i) {
+            struct v4l2_buffer buf;
+            memset(&buf, 0, sizeof(struct v4l2_buffer));
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = i;
 
-                if (xioctl(dev->fd, VIDIOC_QBUF, &buf) == -1) {
-                    fprintf(stderr, "VIDIOC_QBUF ioctl failed\n");
-                    ret = -1;
-                }
-            }
-            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            if (xioctl(dev->fd, VIDIOC_STREAMON, &type) == -1) {
-                fprintf(stderr, "VIDIOC_STREAMON ioctl failed\n");
+            if (xioctl(dev->fd, VIDIOC_QBUF, &buf) == -1) {
+                fprintf(stderr, "VIDIOC_QBUF ioctl failed\n");
                 ret = -1;
             }
-            break;
+        }
+        type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(dev->fd, VIDIOC_STREAMON, &type) == -1) {
+            fprintf(stderr, "VIDIOC_STREAMON ioctl failed\n");
+            ret = -1;
+        }
+        break;
     }
 
     return ret;
@@ -112,15 +121,17 @@ static int process_image(v4l2_capture_t *dev, const void *p,
     printf("Writing buffer into %s_%d file\n", dev->file_name, count);
 
     switch (dev->pix_fmt) {
-        case V4L2_PIX_FMT_JPEG:
-            sprintf(file_name, "%s_%d.jpg", dev->file_name, count);
-            break;
-        case V4L2_PIX_FMT_YUYV:
-            sprintf(file_name, "%s_%d.yuv", dev->file_name, count);
-            break;
-        default:
-            sprintf(file_name, "%s_%d.data", dev->file_name, count);
-            break;
+    case V4L2_PIX_FMT_JPEG:
+        sprintf(file_name, "%s_%d.jpg", dev->file_name, count);
+        break;
+
+    case V4L2_PIX_FMT_YUYV:
+        sprintf(file_name, "%s_%d.yuv", dev->file_name, count);
+        break;
+
+    default:
+        sprintf(file_name, "%s_%d.data", dev->file_name, count);
+        break;
     }
 
     fp = fopen(file_name, "wb");
@@ -129,6 +140,7 @@ static int process_image(v4l2_capture_t *dev, const void *p,
                 file_name, strerror(errno), errno);
         return -1;
     }
+
     fwrite(p, size, 1, fp);
     fflush(stderr);
     fflush(fp);
@@ -143,33 +155,32 @@ static int read_frame(v4l2_capture_t *dev, unsigned int count)
     struct v4l2_buffer buf;
 
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            memset(&buf, 0, sizeof(struct v4l2_buffer));
-            buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            buf.memory = V4L2_MEMORY_MMAP;
-            if (xioctl(dev->fd, VIDIOC_DQBUF, &buf) == -1) {
-                switch (errno) {
-                    case EAGAIN:
-                        return 0;
-                    case EIO:
-                        /* Could ignore EIO, see spec. */
-                        /* fall through */
-                    default:
-                        return -1;
-                }
-            }
-
-            assert(buf.index < dev->buf_count);
-
-            if (process_image(dev, dev->buffer[buf.index].start,
-                              buf.bytesused, count) == -1)
-                return -1;
-
-            if (xioctl(dev->fd, VIDIOC_QBUF, &buf) == -1) {
-                fprintf(stderr, "VIDIOC_QBUF ioctl failed\n");
+    case IO_METHOD_MMAP:
+        memset(&buf, 0, sizeof(struct v4l2_buffer));
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        if (xioctl(dev->fd, VIDIOC_DQBUF, &buf) == -1) {
+            switch (errno) {
+            case EAGAIN:
+                return 0;
+            case EIO:
+                /* Could ignore EIO, see spec. */
+                /* fall through */
+            default:
                 return -1;
             }
-            break;
+        }
+
+        assert(buf.index < dev->buf_count);
+        if (process_image(dev, dev->buffer[buf.index].start,
+            buf.bytesused, count) == -1)
+            return -1;
+
+        if (xioctl(dev->fd, VIDIOC_QBUF, &buf) == -1) {
+            fprintf(stderr, "VIDIOC_QBUF ioctl failed\n");
+            return -1;
+        }
+        break;
     }
 
     return 0;
@@ -195,7 +206,7 @@ static int start_capturing(v4l2_capture_t *dev)
             if (ret == -1) {
                 if (errno == EINTR)
                     continue;
-                fprintf(stdout, "Select error. ret -1\n");
+                fprintf(stderr, "Select error. ret -1\n");
                 return -1;
             }
             if (ret == 0) {
@@ -203,7 +214,7 @@ static int start_capturing(v4l2_capture_t *dev)
                 exit(EXIT_FAILURE);
             }
             if (read_frame(dev, count) == 0) {
-                fprintf(stdout, "Video capture is done\n");
+                fprintf(stderr, "Video capture is done\n");
                 break;
             } else {
                 fprintf(stderr, "Read frame err ret -1\n");
@@ -266,7 +277,7 @@ static int init_mmap(v4l2_capture_t *dev)
         mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
              dev->fd, buf.m.offset);
 
-        if (MAP_FAILED == dev->buffer[n_buffer].start) {
+        if (dev->buffer[n_buffer].start == MAP_FAILED) {
             fprintf(stderr, "Memory map failed\n");
             return -1;
         }
@@ -285,20 +296,21 @@ int uninit_video_device(v4l2_capture_t *dev)
         return -1;
 
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            for (i = 0; i < dev->buf_count; ++i)
-                 if (munmap(dev->buffer[i].start,
-                     dev->buffer[i].length) == -1) {
-                     fprintf(stderr, "Unmapping failed. Error %s (%d)\n",
-                             strerror(errno), errno);
-                     ret = -1;
-                 }
-            break;
-        default:
-            fprintf(stderr, "%d io method not available\n", dev->io);
-            ret = -1;
-            break;
-        }
+    case IO_METHOD_MMAP:
+        for (i = 0; i < dev->buf_count; ++i)
+             if (munmap(dev->buffer[i].start,
+                 dev->buffer[i].length) == -1) {
+                 fprintf(stderr, "Unmapping failed. Error %s (%d)\n",
+                     strerror(errno), errno);
+                 ret = -1;
+             }
+         break;
+
+    default:
+        fprintf(stderr, "%d io method not available\n", dev->io);
+        ret = -1;
+        break;
+    }
 
     free(dev->buffer);
 
@@ -339,8 +351,9 @@ static int v4l2_set_format(v4l2_capture_t *dev)
 
     if ((dev->width == 0) || (dev->height == 0) ||
         (dev->pix_fmt == 0)) {
-        fprintf(stderr, "Invalid resoultion (W x H) %d x %d or pix format - %d\n",
-                dev->width, dev->height, dev->pix_fmt);
+        fprintf(stderr, "Invalid resoultion (W x H) %d x %d "
+            "or pixel format - %d\n", dev->width, dev->height,
+            dev->pix_fmt);
         return -1;
     }
 
@@ -383,14 +396,9 @@ static int init_video_device(v4l2_capture_t *dev)
     memset(&stream_parm, 0, sizeof(struct v4l2_streamparm));
 
     if (xioctl(dev->fd, VIDIOC_QUERYCAP, &cap) == -1) {
-        if (errno == EINVAL) {
-            fprintf(stderr, "%s is no V4L2 device\n", dev->dev_name);
-            return -1;
-        } else {
-            fprintf(stderr, "VIDIOC_QUERYCAP is failed. %s (%d).\n",
-                    strerror(errno), errno);
-            return -1;
-        }
+        fprintf(stderr, "VIDIOC_QUERYCAP is failed. %s (%d).\n",
+            strerror(errno), errno);
+        return -1;
     }
 
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
@@ -399,13 +407,13 @@ static int init_video_device(v4l2_capture_t *dev)
     }
 
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
-                fprintf(stderr, "%s does not support streaming i/o\n",
-                        dev->dev_name);
-                return -1;
-            }
-            break;
+    case IO_METHOD_MMAP:
+        if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+            fprintf(stderr, "%s does not support streaming i/o\n",
+                dev->dev_name);
+            return -1;
+        }
+        break;
     }
 
     cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -414,12 +422,12 @@ static int init_video_device(v4l2_capture_t *dev)
         crop.c = cropcap.defrect;
         if (xioctl(dev->fd, VIDIOC_S_CROP, &crop) == -1) {
             switch (errno) {
-                case EINVAL:
-                    /* Cropping not supported. */
-                    break;
-                default:
-                    /* Errors ignored. */
-                    break;
+            case EINVAL:
+                /* Cropping not supported. */
+                break;
+            default:
+                /* Errors ignored. */
+                break;
             }
         }
     } else {
@@ -436,13 +444,13 @@ static int init_video_device(v4l2_capture_t *dev)
         return -1;
 
     switch (dev->io) {
-        case IO_METHOD_MMAP:
-            ret = init_mmap(dev);
-            break;
-        default:
-            printf("io changed to default mode IO_METHOD_MMAP\n");
-            dev->io = IO_METHOD_MMAP;
-            break;
+    case IO_METHOD_MMAP:
+        ret = init_mmap(dev);
+        break;
+    default:
+        printf("io changed to default mode IO_METHOD_MMAP\n");
+        dev->io = IO_METHOD_MMAP;
+        break;
     }
 
     return ret;
